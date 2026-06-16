@@ -8,13 +8,21 @@ use JsonException;
 use LiquidRazor\DtoApiBundle\Lib\Attributes\{DtoApi, DtoApiOperation, DtoApiRequest, DtoApiResponse};
 use LiquidRazor\DtoApiBundle\Lib\Response\ResponseMappingResolver;
 use LiquidRazor\DtoApiBundle\OpenApi\Schema\{DtoSchemaFactory, DtoSchemaRegistry};
+use BackedEnum;
 use ReflectionAttribute;
 use ReflectionClass;
+use ReflectionEnum;
 use ReflectionException;
 use ReflectionMethod;
+use ReflectionNamedType;
+use ReflectionParameter;
 use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\HttpKernel\Attribute\MapQueryString;
 use Symfony\Component\Routing\Route;
 use Symfony\Component\Routing\RouterInterface;
+
+use function preg_match_all;
+use function str_contains;
 
 final readonly class OpenApiBuilder
 {
@@ -63,7 +71,7 @@ final readonly class OpenApiBuilder
             $httpMethods = $route->getMethods() ?: ['GET'];
             foreach ($httpMethods as $http) {
                 $http = strtolower($http);
-                $operation = $this->operationObject($rc, $rm, $op, $components, $tags);
+                $operation = $this->operationObject($rc, $rm, $op, $route, $components, $tags);
                 $paths[$path][$http] = $operation;
             }
         }
@@ -106,7 +114,7 @@ final readonly class OpenApiBuilder
      * @throws ReflectionException
      * @throws JsonException
      */
-    private function operationObject(ReflectionClass $rc, ReflectionMethod $rm, DtoApiOperation $op, array &$components, array &$tags): array
+    private function operationObject(ReflectionClass $rc, ReflectionMethod $rm, DtoApiOperation $op, Route $route, array &$components, array &$tags): array
     {
         // Tags: prefer DtoApi on class, else attribute tag, else short class
         $classMeta = ($rc->getAttributes(DtoApi::class)[0] ?? null)?->newInstance();
@@ -122,6 +130,12 @@ final readonly class OpenApiBuilder
             'description' => $op->description,
             'tags' => [$tagName]
         ];
+
+        // Path placeholders + #[MapQueryString] query DTO -> parameters
+        $parameters = $this->buildParameters($route, $rm);
+        if ($parameters !== []) {
+            $out['parameters'] = $parameters;
+        }
 
         // Request body
         if (is_string($op->request) && class_exists($op->request)) {
@@ -201,11 +215,193 @@ final readonly class OpenApiBuilder
     }
 
     /**
+     * Build the OpenAPI `parameters` list for an operation: one entry per path
+     * `{placeholder}`, plus the query string DTO bound via #[MapQueryString].
+     *
+     * Path params come first; query params follow. Path placeholders win on a
+     * name clash (a query DTO property never shadows a path segment).
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function buildParameters(Route $route, ReflectionMethod $rm): array
+    {
+        $parameters = $this->pathParameters($route);
+
+        $seen = [];
+        foreach ($parameters as $parameter) {
+            $seen[$parameter['name']] = true;
+        }
+
+        foreach ($this->queryParameters($rm) as $parameter) {
+            if (isset($seen[$parameter['name']])) {
+                continue;
+            }
+            $parameters[] = $parameter;
+        }
+
+        return $parameters;
+    }
+
+    /**
+     * One `{name, in: path, required: true, schema}` entry per `{placeholder}`
+     * in the route path. Type is inferred from the route requirement: a numeric
+     * requirement (`\d+` / `[0-9]+`) yields `integer`, everything else `string`.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function pathParameters(Route $route): array
+    {
+        if (!preg_match_all('/\{([^}]+)\}/', $route->getPath(), $matches)) {
+            return [];
+        }
+
+        $requirements = $route->getRequirements();
+        $parameters = [];
+        foreach ($matches[1] as $name) {
+            $requirement = $requirements[$name] ?? null;
+            $type = ($requirement !== null && (str_contains($requirement, '\d') || str_contains($requirement, '[0-9]')))
+                ? 'integer'
+                : 'string';
+
+            $parameters[] = [
+                'name' => $name,
+                'in' => 'path',
+                'required' => true,
+                'schema' => ['type' => $type],
+            ];
+        }
+
+        return $parameters;
+    }
+
+    /**
+     * Reflect the #[MapQueryString] DTO bound to the controller method into
+     * `{name, in: query, required, schema}` entries — one per constructor
+     * promoted property. Returns `[]` when the method binds no query DTO.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function queryParameters(ReflectionMethod $rm): array
+    {
+        foreach ($rm->getParameters() as $parameter) {
+            if ($parameter->getAttributes(MapQueryString::class) === []) {
+                continue;
+            }
+
+            $type = $parameter->getType();
+            if (!$type instanceof ReflectionNamedType || $type->isBuiltin()) {
+                return [];
+            }
+
+            $dto = $type->getName();
+            if (!class_exists($dto)) {
+                return [];
+            }
+
+            return $this->queryParametersForDto($dto);
+        }
+
+        return [];
+    }
+
+    /**
+     * @param class-string $dto
+     *
+     * @return list<array<string, mixed>>
+     * @throws ReflectionException
+     */
+    private function queryParametersForDto(string $dto): array
+    {
+        $constructor = (new ReflectionClass($dto))->getConstructor();
+        if ($constructor === null) {
+            return [];
+        }
+
+        $parameters = [];
+        foreach ($constructor->getParameters() as $parameter) {
+            $type = $parameter->getType();
+            if (!$type instanceof ReflectionNamedType) {
+                continue;
+            }
+
+            // Required only when the value is neither nullable nor defaulted.
+            $required = !$type->allowsNull() && !$parameter->isDefaultValueAvailable();
+
+            $parameters[] = [
+                'name' => $parameter->getName(),
+                'in' => 'query',
+                'required' => $required,
+                'schema' => $this->queryParameterSchema($type, $parameter),
+            ];
+        }
+
+        return $parameters;
+    }
+
+    /**
+     * @return array<string, mixed>
+     * @throws ReflectionException
+     */
+    private function queryParameterSchema(ReflectionNamedType $type, ReflectionParameter $parameter): array
+    {
+        $name = $type->getName();
+
+        $schema = match (true) {
+            $name === 'int' => ['type' => 'integer'],
+            $name === 'float' => ['type' => 'number'],
+            $name === 'bool' => ['type' => 'boolean'],
+            $name === 'array' => ['type' => 'array', 'items' => ['type' => 'string']],
+            enum_exists($name) => $this->enumSchema($name),
+            default => ['type' => 'string'],
+        };
+
+        if ($parameter->isDefaultValueAvailable()) {
+            $default = $parameter->getDefaultValue();
+            if ($default instanceof BackedEnum) {
+                $schema['default'] = $default->value;
+            } elseif ($default !== null && !is_array($default)) {
+                $schema['default'] = $default;
+            }
+        }
+
+        return $schema;
+    }
+
+    /**
+     * @param class-string $enum
+     *
+     * @return array<string, mixed>
+     * @throws ReflectionException
+     */
+    private function enumSchema(string $enum): array
+    {
+        $reflection = new ReflectionEnum($enum);
+        $backingType = $reflection->getBackingType();
+        $type = ($backingType instanceof ReflectionNamedType && $backingType->getName() === 'int')
+            ? 'integer'
+            : 'string';
+
+        $values = [];
+        foreach ($reflection->getCases() as $case) {
+            $instance = $case->getValue();
+            if ($instance instanceof BackedEnum) {
+                $values[] = $instance->value;
+            }
+        }
+
+        return ['type' => $type, 'enum' => $values];
+    }
+
+    /**
      * @throws JsonException
      */
     private function objectify(array $arr): object
     {
-        // Convert associative arrays to stdClass for cleaner JSON output
-        return json_decode(json_encode($arr, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), false, 512, JSON_THROW_ON_ERROR);
+        // Convert associative arrays to stdClass for cleaner JSON output. The
+        // (object) cast guards the empty case: an empty array round-trips to `[]`
+        // (an array, not an object), so an operation with no responses or a
+        // document with no paths would otherwise violate the object return type
+        // and, in JSON, render `[]` where OpenAPI requires `{}`.
+        return (object) json_decode(json_encode($arr, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), false, 512, JSON_THROW_ON_ERROR);
     }
 }
