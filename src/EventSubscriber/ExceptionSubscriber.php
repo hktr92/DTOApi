@@ -19,6 +19,7 @@ final readonly class ExceptionSubscriber implements EventSubscriberInterface
     public function __construct(
         private LoggerInterface     $logger,
         private SerializerInterface $serializer,
+        private bool                $debug = false,
     ) {}
 
     public static function getSubscribedEvents(): array
@@ -143,17 +144,22 @@ final readonly class ExceptionSubscriber implements EventSubscriberInterface
         // Hide details for 5xx; show a message for 4xx (safe client error)
         $isServer = $status >= 500;
 
+        // The exception class + code are a debugging aid only. Exposing them to
+        // clients in production leaks internal implementation detail, so the hint
+        // is gated behind kernel.debug. The `errors` key is always present (null
+        // when withheld) so the response shape stays stable across environments.
+        $exposeHint = $this->debug && !$isServer;
+
         return [
             'type'   => $isServer ? 'Internal server error' : ('https://httpstatuses.com/' . $status),
             'message'  => $isServer ? 'Something went wrong' : ($e->getMessage() ?: 'Request error'),
             'status' => $status,
             'detail' => $isServer ? null : $e->getMessage(),
             'instance' => $uri,
-            // Keep a minimal hint for debugging; you can remove in prod
-            'errors' => $isServer ? null : [
+            'errors' => $exposeHint ? [
                 'exception' => $e::class,
                 'code'      => $e->getCode(),
-            ],
+            ] : null,
         ];
     }
 }
