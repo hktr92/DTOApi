@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use LiquidRazor\DtoApiBundle\Command\GenerateTsTypesCommand;
 use LiquidRazor\DtoApiBundle\Controller\ApiDocsController;
 use LiquidRazor\DtoApiBundle\Controller\OpenApiController;
 use LiquidRazor\DtoApiBundle\EventSubscriber\ExceptionSubscriber;
@@ -14,6 +15,7 @@ use LiquidRazor\DtoApiBundle\Lib\Streaming\SseStreamer;
 use LiquidRazor\DtoApiBundle\OpenApi\OpenApiBuilder;
 use LiquidRazor\DtoApiBundle\OpenApi\Schema\DtoSchemaFactory;
 use LiquidRazor\DtoApiBundle\OpenApi\Schema\DtoSchemaRegistry;
+use LiquidRazor\DtoApiBundle\OpenApi\TypeScript\TsTypeGenerator;
 use LiquidRazor\DtoApiBundle\Profiler\DtoApiCollector;
 use LiquidRazor\DtoApiBundle\Resolver\DtoApiRequestResolver;
 use LiquidRazor\DtoApiBundle\Validation\Constraints\UniqueItemsValidator;
@@ -39,6 +41,7 @@ return static function (ContainerConfigurator $config): void {
         ->tag('kernel.event_subscriber');
 
     $services->set(ExceptionSubscriber::class)
+        ->arg('$debug', '%kernel.debug%')
         ->tag('kernel.event_subscriber');
 
     $services->set(DtoApiRequestResolver::class)
@@ -83,4 +86,10 @@ return static function (ContainerConfigurator $config): void {
     $services->set(OpenApiController::class)
         ->tag('controller.service_arguments')
         ->public();
+
+    // TypeScript codegen: pure generator + the console command that drives it.
+    $services->set(TsTypeGenerator::class);
+
+    $services->set(GenerateTsTypesCommand::class)
+        ->tag('console.command');
 };
