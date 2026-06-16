@@ -56,6 +56,18 @@ final class GenerateTsTypesCommand extends Command
                 null,
                 InputOption::VALUE_NONE,
                 'Exit non-zero if the output file is missing or stale (requires --output)',
+            )
+            ->addOption(
+                'nullable-wrapper',
+                null,
+                InputOption::VALUE_REQUIRED,
+                'Wrap nullable types as Wrapper<T> instead of T | null (e.g. Option)',
+            )
+            ->addOption(
+                'nullable-import',
+                null,
+                InputOption::VALUE_REQUIRED,
+                'Module to import the nullable wrapper from (e.g. ../shared.types)',
             );
     }
 
@@ -63,7 +75,12 @@ final class GenerateTsTypesCommand extends Command
     {
         $io = new SymfonyStyle($input, $output);
 
-        $ts = $this->generator->generate($this->builder->build());
+        /** @var string|null $nullableWrapper */
+        $nullableWrapper = $input->getOption('nullable-wrapper');
+        /** @var string|null $nullableImport */
+        $nullableImport = $input->getOption('nullable-import');
+
+        $ts = $this->generator->generate($this->builder->build(), $nullableWrapper, $nullableImport);
 
         /** @var string|null $path */
         $path = $input->getOption('output');

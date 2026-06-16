@@ -18,6 +18,43 @@ final class TsTypeGeneratorTest extends TestCase
         ]);
     }
 
+    public function testNullableWrapperWrapsAndImportsWhenUsed(): void
+    {
+        $ts = (new TsTypeGenerator())->generate([
+            'components' => ['schemas' => [
+                'Foo' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'note' => ['type' => ['null', 'string']],
+                        'tags' => ['type' => 'array', 'items' => ['type' => ['null', 'string']]],
+                        'id' => ['type' => 'integer'],
+                    ],
+                    'required' => ['note', 'tags', 'id'],
+                ],
+            ]],
+        ], 'Option', '../shared.types');
+
+        self::assertStringContainsString("import type { Option } from '../shared.types';", $ts);
+        self::assertStringContainsString('note: Option<string>;', $ts);
+        // Nullable array items wrap too.
+        self::assertStringContainsString('tags: Option<string>[];', $ts);
+        // Non-nullable stays bare.
+        self::assertStringContainsString('id: number;', $ts);
+        self::assertStringNotContainsString('| null', $ts);
+    }
+
+    public function testNullableWrapperImportOmittedWhenUnused(): void
+    {
+        $ts = (new TsTypeGenerator())->generate([
+            'components' => ['schemas' => [
+                'Foo' => ['type' => 'object', 'properties' => ['id' => ['type' => 'integer']], 'required' => ['id']],
+            ]],
+        ], 'Option', '../shared.types');
+
+        // No nullable property → no wrapper usage → no import line.
+        self::assertStringNotContainsString('import type', $ts);
+    }
+
     public function testEmitsHeaderAndOneTypePerSchema(): void
     {
         $ts = $this->generate([

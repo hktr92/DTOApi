@@ -13,6 +13,7 @@ use function is_int;
 use function is_string;
 use function preg_match;
 use function sprintf;
+use function str_contains;
 
 /**
  * Turns an OpenAPI document's `components.schemas` into TypeScript type aliases.
@@ -39,11 +40,13 @@ final readonly class TsTypeGenerator
         TS;
 
     /**
-     * @param array<string, mixed> $openApi the full document from OpenApiBuilder::build()
+     * @param array<string, mixed> $openApi             the full document from OpenApiBuilder::build()
+     * @param string|null          $nullableWrapper     wrap nullable types as `Wrapper<T>` instead of `T | null` (e.g. `Option`); null keeps the union form
+     * @param string|null          $nullableWrapperImport module to `import type { Wrapper } from …` (emitted only when the wrapper is used)
      *
      * @throws JsonException
      */
-    public function generate(array $openApi): string
+    public function generate(array $openApi, ?string $nullableWrapper = null, ?string $nullableWrapperImport = null): string
     {
         // The builder mixes arrays and stdClass (paths/schemas are objectified at
         // different depths). Round-trip through JSON to a pure nested-array form
@@ -54,27 +57,36 @@ final readonly class TsTypeGenerator
         /** @var array<string, mixed> $schemas */
         $schemas = $doc['components']['schemas'] ?? [];
 
-        $blocks = [self::HEADER];
+        $blocks = [];
         foreach ($schemas as $name => $schema) {
             if (!is_array($schema)) {
                 continue;
             }
-            $blocks[] = $this->renderType((string) $name, $schema);
+            $blocks[] = $this->renderType((string) $name, $schema, $nullableWrapper);
         }
 
-        return implode("\n\n", $blocks) . "\n";
+        $body = implode("\n\n", $blocks);
+
+        $header = self::HEADER;
+        // Only import the wrapper when something actually used it, so the output
+        // never carries an unused import (which eslint would flag).
+        if (null !== $nullableWrapper && null !== $nullableWrapperImport && str_contains($body, $nullableWrapper . '<')) {
+            $header .= sprintf("\n\nimport type { %s } from '%s';", $nullableWrapper, $nullableWrapperImport);
+        }
+
+        return $header . "\n\n" . $body . "\n";
     }
 
     /**
      * @param array<string, mixed> $schema
      */
-    private function renderType(string $name, array $schema): string
+    private function renderType(string $name, array $schema, ?string $nullableWrapper): string
     {
         // Top-level DTO schemas are objects with a `properties` map; anything else
         // (a bare enum, a scalar) becomes a simple alias.
         $properties = $schema['properties'] ?? null;
         if (!is_array($properties)) {
-            return sprintf('export type %s = %s;', $name, $this->tsType($schema));
+            return sprintf('export type %s = %s;', $name, $this->tsType($schema, $nullableWrapper));
         }
 
         /** @var list<string> $required */
@@ -86,7 +98,7 @@ final readonly class TsTypeGenerator
                 continue;
             }
             $optional = in_array((string) $key, $required, true) ? '' : '?';
-            $lines[] = sprintf('    %s%s: %s;', $this->propertyKey((string) $key), $optional, $this->tsType($propSchema));
+            $lines[] = sprintf('    %s%s: %s;', $this->propertyKey((string) $key), $optional, $this->tsType($propSchema, $nullableWrapper));
         }
 
         if ($lines === []) {
@@ -101,7 +113,7 @@ final readonly class TsTypeGenerator
      *
      * @param array<string, mixed> $node
      */
-    private function tsType(array $node): string
+    private function tsType(array $node, ?string $nullableWrapper): string
     {
         // $ref always wins — point at the referenced type name.
         if (isset($node['$ref']) && is_string($node['$ref'])) {
@@ -113,9 +125,13 @@ final readonly class TsTypeGenerator
             $nullable = true;
         }
 
-        $base = $this->baseType($type, $node);
+        $base = $this->baseType($type, $node, $nullableWrapper);
 
-        return $nullable ? $base . ' | null' : $base;
+        if (!$nullable) {
+            return $base;
+        }
+
+        return null !== $nullableWrapper ? sprintf('%s<%s>', $nullableWrapper, $base) : $base . ' | null';
     }
 
     /**
@@ -143,7 +159,7 @@ final readonly class TsTypeGenerator
     /**
      * @param array<string, mixed> $node
      */
-    private function baseType(?string $type, array $node): string
+    private function baseType(?string $type, array $node, ?string $nullableWrapper): string
     {
         // Enums short-circuit the scalar mapping: emit a literal union.
         if (isset($node['enum']) && is_array($node['enum']) && $node['enum'] !== []) {
@@ -154,8 +170,8 @@ final readonly class TsTypeGenerator
             'string' => 'string',
             'integer', 'number' => 'number',
             'boolean' => 'boolean',
-            'array' => $this->arrayType($node),
-            'object' => $this->objectType($node),
+            'array' => $this->arrayType($node, $nullableWrapper),
+            'object' => $this->objectType($node, $nullableWrapper),
             default => 'unknown',
         };
     }
@@ -163,14 +179,14 @@ final readonly class TsTypeGenerator
     /**
      * @param array<string, mixed> $node
      */
-    private function arrayType(array $node): string
+    private function arrayType(array $node, ?string $nullableWrapper): string
     {
         $items = $node['items'] ?? null;
         if (!is_array($items)) {
             return 'unknown[]';
         }
 
-        $itemType = $this->tsType($items);
+        $itemType = $this->tsType($items, $nullableWrapper);
 
         // Parenthesise unions so `(A | null)[]` keeps its meaning.
         return preg_match('/[ |]/', $itemType) ? sprintf('(%s)[]', $itemType) : $itemType . '[]';
@@ -179,7 +195,7 @@ final readonly class TsTypeGenerator
     /**
      * @param array<string, mixed> $node
      */
-    private function objectType(array $node): string
+    private function objectType(array $node, ?string $nullableWrapper): string
     {
         // An object with declared properties is an inline shape; the bare
         // `type: object` fallback (no properties) becomes an index signature.
@@ -193,7 +209,7 @@ final readonly class TsTypeGenerator
                     continue;
                 }
                 $optional = in_array((string) $key, $required, true) ? '' : '?';
-                $parts[] = sprintf('%s%s: %s', $this->propertyKey((string) $key), $optional, $this->tsType($propSchema));
+                $parts[] = sprintf('%s%s: %s', $this->propertyKey((string) $key), $optional, $this->tsType($propSchema, $nullableWrapper));
             }
 
             return $parts === [] ? 'Record<string, unknown>' : '{ ' . implode('; ', $parts) . ' }';
