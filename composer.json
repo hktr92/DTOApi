@@ -18,6 +18,7 @@
     "ext-json": "*",
     "symfony/dependency-injection": "^7 || ^8",
     "symfony/config": "^7 || ^8",
+    "symfony/console": "^7 || ^8",
     "symfony/http-kernel": "^7 || ^8",
     "symfony/serializer": "^7 || ^8",
     "symfony/property-access": "^7 || ^8",
