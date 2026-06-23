@@ -46,7 +46,7 @@ final readonly class OpenApiBuilder
         $components = ['schemas' => (object)[]];
         $tags = [];
 
-        foreach ($this->router->getRouteCollection() as $route) {
+        foreach ($this->router->getRouteCollection() as $routeName => $route) {
             $controller = $route->getDefault('_controller') ?? null;
             if (!$controller || !is_string($controller)) continue;
 
@@ -69,9 +69,17 @@ final readonly class OpenApiBuilder
             $path = $this->toOpenApiPath($route);
 
             $httpMethods = $route->getMethods() ?: ['GET'];
+            $multiMethod = count($httpMethods) > 1;
             foreach ($httpMethods as $http) {
                 $http = strtolower($http);
-                $operation = $this->operationObject($rc, $rm, $op, $route, $components, $tags);
+                // operationId reuses the (unique) route name. A route is unique
+                // within a RouteCollection, so this is collision-free by
+                // construction — unlike the short class name, which repeats
+                // across modules under one-route-one-controller. When a single
+                // route declares more than one HTTP method, the method is
+                // suffixed so the two operations under one path stay distinct.
+                $operationId = $multiMethod ? $routeName . '_' . $http : $routeName;
+                $operation = $this->operationObject($rc, $rm, $op, $route, $operationId, $components, $tags);
                 $paths[$path][$http] = $operation;
             }
         }
@@ -114,15 +122,13 @@ final readonly class OpenApiBuilder
      * @throws ReflectionException
      * @throws JsonException
      */
-    private function operationObject(ReflectionClass $rc, ReflectionMethod $rm, DtoApiOperation $op, Route $route, array &$components, array &$tags): array
+    private function operationObject(ReflectionClass $rc, ReflectionMethod $rm, DtoApiOperation $op, Route $route, string $operationId, array &$components, array &$tags): array
     {
         // Tags: prefer DtoApi on class, else attribute tag, else short class
         $classMeta = ($rc->getAttributes(DtoApi::class)[0] ?? null)?->newInstance();
         $tagName = $op->tag ?? $classMeta?->name ?? $rc->getShortName();
 
         $tags[$tagName] ??= ['name' => $tagName];
-
-        $operationId = $rc->getShortName() . '::' . $rm->getName();
 
         $out = [
             'operationId' => $operationId,
