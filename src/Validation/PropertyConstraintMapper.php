@@ -98,9 +98,7 @@ final class PropertyConstraintMapper
                 if ($pt) { $itemConstraints[] = $pt; }
             }
             if ($meta->itemsRef) {
-                // Typed object list; Type(class) + cascade validation
-                $itemConstraints[] = new Assert\Type($meta->itemsRef);
-                $itemConstraints[] = new Assert\Valid();
+                $constraints[] = new Assert\Valid();
             }
             if ($itemConstraints !== []) {
                 $constraints[] = new Assert\All($itemConstraints);
