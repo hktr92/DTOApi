@@ -55,7 +55,14 @@ final readonly class ResponseMappingResolver
             if (!is_string($fqcn) || !class_exists($fqcn)) { continue; }
             $meta = $this->readClassResponseMeta($fqcn);
             if ($meta === null) { // default to 200 if the class forgot to annotate
-                $meta = ['status' => 200, 'class' => $fqcn, 'contentType' => 'application/json', 'stream' => false];
+                $meta = [
+                    'status' => 200,
+                    'class' => $fqcn,
+                    'contentType' => 'application/json',
+                    'stream' => false,
+                    'name' => null,
+                    'description' => null,
+                ];
             }
             // don’t override an existing method-level mapping for the same status
             $out[$meta['status']] ??= $meta;
