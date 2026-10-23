@@ -105,8 +105,8 @@ readonly class RequestDtoSubscriber implements EventSubscriberInterface
                 'status' => $r['status'],
                 'contentType' => $r['contentType'],
                 'stream' => $r['stream'],
-                'name' => $r['name'],
-                'description' => $r['description'],
+                'name' => $r['name'] ?? null,
+                'description' => $r['description'] ?? null,
             ], $resolvedResponses),
             'deprecated' => $op->deprecated,
         ]);
